@@ -38,7 +38,7 @@ source venv/bin/activate  # or venv\Scripts\activate on Windows
 pip install -r requirements.txt
 ```
 
-4. Run the script:
+4. Run the desired script:
 
 ```bash
 python -m folder_name.script_name
