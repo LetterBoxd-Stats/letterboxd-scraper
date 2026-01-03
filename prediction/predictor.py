@@ -3,6 +3,7 @@ predict_and_upload.py
 
 Script to load XGBoost models from MongoDB, predict ratings and likes for all user-film pairs,
 and upload predicted reviews to films collection with flags for existing interactions.
+Updated to include correlation-based features from train_model.py
 """
 
 import base64
@@ -79,6 +80,8 @@ def load_xgboost_models(db):
         # Try to get feature names from model or database
         if hasattr(like_model, 'feature_names_'):
             like_feature_names = like_model.feature_names_
+        elif "like_feature_names" in model_doc:
+            like_feature_names = model_doc["like_feature_names"]
         elif "like_feature_importance" in model_doc:
             like_feature_names = [item["feature"] for item in model_doc["like_feature_importance"]]
     
@@ -87,6 +90,8 @@ def load_xgboost_models(db):
     
     logging.info(f"Rating model loaded ({len(feature_columns)} features)")
     logging.info(f"Like model loaded: {like_model is not None}")
+    if like_model and like_feature_names:
+        logging.info(f"Like model features: {len(like_feature_names)}")
     
     return {
         "rating_model": rating_model,
@@ -105,14 +110,16 @@ def load_users_and_films(db):
     users_col = db[USERS_COLLECTION]
     films_col = db[FILMS_COLLECTION]
     
-    # Load users with their stats
-    logging.info("Loading users data...")
+    # Load users with their stats and correlation data
+    logging.info("Loading users data with correlation stats...")
     users = {}
     for user_doc in users_col.find({}, {"username": 1, "stats": 1}):
         username = user_doc.get("username")
         if username:
+            stats = user_doc.get("stats", {})
             users[username] = {
-                "stats": user_doc.get("stats", {}),
+                "stats": stats,
+                "correlation_stats": stats.get("correlation_stats", {}),
                 "existing_ratings": {},  # film_id -> rating
                 "existing_likes": {},    # film_id -> liked (True/False)
                 "existing_watches": set() # film_ids watched
@@ -199,12 +206,13 @@ def load_users_and_films(db):
     return users, films
 
 # ──────────────────────────────────────────────
-# FEATURE ENGINEERING FOR PREDICTION
+# FEATURE ENGINEERING FOR PREDICTION (UPDATED WITH CORRELATION FEATURES)
 # ──────────────────────────────────────────────
 def prepare_features_for_prediction(user_id: str, user_data: Dict, film_id: str, film_data: Dict) -> Dict:
-    """Prepare feature vector for a user-film pair"""
+    """Prepare feature vector for a user-film pair with correlation-based features"""
     
     user_stats = user_data.get("stats", {})
+    correlation_stats = user_data.get("correlation_stats", {})
     film_metadata = film_data.get("metadata", {})
     
     # Get film aggregates excluding current user (for new predictions)
@@ -290,7 +298,21 @@ def prepare_features_for_prediction(user_id: str, user_data: Dict, film_id: str,
     # Genre feature for like prediction
     avg_genre_like_ratio = sum(genre_like_ratios) / len(genre_like_ratios) if genre_like_ratios else SENTINEL_MISSING
     
-    # Build features dictionary
+    # Correlation coefficients (default to 0 if not available)
+    runtime_rating_corr = correlation_stats.get('runtime_vs_rating', {}).get('correlation', 0)
+    year_rating_corr = correlation_stats.get('year_vs_rating', {}).get('correlation', 0)
+    letterboxd_rating_corr = correlation_stats.get('letterboxd_vs_rating', {}).get('correlation', 0)
+    runtime_like_corr = correlation_stats.get('runtime_vs_like', {}).get('correlation', 0)
+    year_like_corr = correlation_stats.get('year_vs_like', {}).get('correlation', 0)
+    letterboxd_like_corr = correlation_stats.get('letterboxd_vs_like', {}).get('correlation', 0)
+    rating_like_corr = correlation_stats.get('rating_vs_like', {}).get('correlation', 0)
+    
+    # Film metadata
+    film_letterboxd_avg = film_metadata.get("avg_rating", 3.0)
+    film_runtime = film_metadata.get("runtime", 0)
+    film_year = film_metadata.get("year", 0)
+    
+    # Build features dictionary with correlation-based features
     features = {
         # User-level
         "user_avg_rating": user_avg_rating_excl_film,
@@ -302,25 +324,46 @@ def prepare_features_for_prediction(user_id: str, user_data: Dict, film_id: str,
         "film_like_ratio": film_like_ratio_excl_user,
         "film_num_ratings": film_data.get("num_ratings", 0),
         "film_num_watches": film_data.get("num_watches", 0),
-        "film_letterboxd_avg": film_metadata.get("avg_rating", 3.0),
-        "film_runtime": film_metadata.get("runtime", 0),
-        "film_year": film_metadata.get("year", 0),
+        "film_letterboxd_avg": film_letterboxd_avg,
+        "film_runtime": film_runtime,
+        "film_year": film_year,
+        
+        # Correlation coefficients (for rating prediction)
+        "user_runtime_rating_corr": runtime_rating_corr,
+        "user_year_rating_corr": year_rating_corr,
+        "user_letterboxd_rating_corr": letterboxd_rating_corr,
+        
+        # Correlation-weighted features (personalized for rating)
+        "runtime_weighted_by_corr": film_runtime * (1 + runtime_rating_corr) if film_runtime else 0,
+        "year_weighted_by_corr": film_year * (1 + year_rating_corr) if film_year else 0,
+        "letterboxd_weighted_by_corr": film_letterboxd_avg * (1 + letterboxd_rating_corr),
         
         # Genre compatibility
         "max_genre_rating": max_genre_rating,
         "min_genre_rating": min_genre_rating,
         "avg_genre_rating": avg_genre_rating,
         "total_genre_watches": total_genre_watches,
-        "avg_genre_like_ratio": avg_genre_like_ratio
+        "avg_genre_like_ratio": avg_genre_like_ratio,
+        
+        # Additional correlation coefficients for like prediction
+        "user_runtime_like_corr": runtime_like_corr,
+        "user_year_like_corr": year_like_corr,
+        "user_letterboxd_like_corr": letterboxd_like_corr,
+        "user_rating_like_corr": rating_like_corr,
+        
+        # Correlation-weighted features for like prediction
+        "runtime_weighted_by_like_corr": film_runtime * (1 + runtime_like_corr) if film_runtime else 0,
+        "year_weighted_by_like_corr": film_year * (1 + year_like_corr) if film_year else 0,
+        "letterboxd_weighted_by_like_corr": film_letterboxd_avg * (1 + letterboxd_like_corr),
     }
     
     return features
 
 # ──────────────────────────────────────────────
-# MAKE PREDICTIONS
+# MAKE PREDICTIONS (UPDATED FOR CORRELATION FEATURES)
 # ──────────────────────────────────────────────
 def predict_for_all_users(users: Dict, films: Dict, models: Dict) -> Dict:
-    """Predict ratings and likes for all user-film combinations"""
+    """Predict ratings and likes for all user-film combinations with correlation features"""
     
     rating_model = models["rating_model"]
     like_model = models["like_model"]
@@ -330,7 +373,7 @@ def predict_for_all_users(users: Dict, films: Dict, models: Dict) -> Dict:
     predictions = {}
     total_predictions = 0
     
-    logging.info("Starting predictions for all user-film pairs...")
+    logging.info("Starting predictions for all user-film pairs with correlation features...")
     
     for film_id, film_data in films.items():
         film_predictions = []
@@ -385,7 +428,7 @@ def predict_for_all_users(users: Dict, films: Dict, models: Dict) -> Dict:
                 # No existing interaction - predict both rating and like
                 features = prepare_features_for_prediction(user_id, user_data, film_id, film_data)
                 
-                # Predict rating
+                # Predict rating using correlation-based features
                 rating_features = [features.get(col, 0) for col in feature_columns]
                 
                 try:
@@ -400,21 +443,34 @@ def predict_for_all_users(users: Dict, films: Dict, models: Dict) -> Dict:
                 
                 if like_model and like_feature_names:
                     try:
+                        # Build like prediction features based on train_model.py structure
                         like_features = [
-                            features.get("user_like_ratio", 0),
-                            user_data.get("stats", {}).get("mean_abs_diff", 0),  # user_rating_consistency
-                            features.get("film_avg_rating", 0),
-                            features.get("film_like_ratio", 0),
-                            features.get("film_num_ratings", 0),
-                            features.get("film_letterboxd_avg", 0),
-                            features.get("film_runtime", 0),
-                            features.get("film_year", 0),
-                            features.get("avg_genre_like_ratio", 0),
-                            features.get("total_genre_watches", 0)
+                            features.get("user_like_ratio", 0),                           # user_like_ratio
+                            user_data.get("stats", {}).get("mean_abs_diff", 0),          # user_rating_consistency
+                            features.get("user_rating_like_corr", 0),                    # user_rating_like_corr
+                            features.get("user_runtime_like_corr", 0),                   # user_runtime_like_corr
+                            features.get("user_year_like_corr", 0),                      # user_year_like_corr
+                            features.get("user_letterboxd_like_corr", 0),                # user_letterboxd_like_corr
+                            features.get("film_avg_rating", 0),                          # film_avg_rating
+                            features.get("film_like_ratio", 0),                          # film_like_ratio
+                            features.get("film_num_ratings", 0),                         # film_num_ratings
+                            features.get("film_letterboxd_avg", 0),                      # film_letterboxd_avg
+                            features.get("film_runtime", 0),                             # film_runtime
+                            features.get("film_year", 0),                                # film_year
+                            features.get("runtime_weighted_by_like_corr", 0),            # runtime_weighted_by_like_corr
+                            features.get("year_weighted_by_like_corr", 0),               # year_weighted_by_like_corr
+                            features.get("letterboxd_weighted_by_like_corr", 0),         # letterboxd_weighted_by_like_corr
+                            features.get("avg_genre_like_ratio", 0),                     # avg_genre_like_ratio
+                            features.get("total_genre_watches", 0)                       # total_genre_watches
                         ]
                         
-                        predicted_like_probability = float(like_model.predict_proba([like_features])[0][1])
-                        predicted_like = predicted_like_probability >= 0.5
+                        # Ensure we have the right number of features
+                        if len(like_features) == len(like_feature_names):
+                            predicted_like_probability = float(like_model.predict_proba([like_features])[0][1])
+                            predicted_like = predicted_like_probability >= 0.5
+                        else:
+                            logging.warning(f"Feature mismatch for like prediction: expected {len(like_feature_names)}, got {len(like_features)}")
+                            raise ValueError("Feature mismatch")
                     except Exception as e:
                         logging.warning(f"Like prediction failed for user {user_id}, film {film_id}: {e}")
                         # Fallback: use user's average like ratio
@@ -441,7 +497,7 @@ def predict_for_all_users(users: Dict, films: Dict, models: Dict) -> Dict:
         
         predictions[film_id] = film_predictions
     
-    logging.info(f"Generated {total_predictions:,} predictions across {len(films)} films")
+    logging.info(f"Generated {total_predictions:,} predictions across {len(films)} films with correlation features")
     return predictions
 
 # ──────────────────────────────────────────────
@@ -494,7 +550,7 @@ def upload_predictions_to_mongodb(db, predictions: Dict, batch_size: int = 100):
     return total_uploaded
 
 # ──────────────────────────────────────────────
-# 📊 GENERATE PREDICTION SUMMARY
+# GENERATE PREDICTION SUMMARY
 # ──────────────────────────────────────────────
 def generate_prediction_summary(predictions: Dict, users: Dict, films: Dict) -> Dict:
     """Generate summary statistics about the predictions"""
@@ -549,18 +605,18 @@ def generate_prediction_summary(predictions: Dict, users: Dict, films: Dict) -> 
     }
     
     logging.info("\n" + "="*80)
-    logging.info("📊 PREDICTION SUMMARY")
+    logging.info("PREDICTION SUMMARY WITH CORRELATION FEATURES")
     logging.info("="*80)
     logging.info(f"Total predictions: {summary['total_predictions']:,}")
     logging.info(f"Users: {summary['total_users']:,}, Films: {summary['total_films']:,}")
     logging.info(f"Already rated: {summary['already_rated_count']:,}")
     logging.info(f"Already watched: {summary['already_watched_count']:,}")
     logging.info(f"Fully predicted (new): {summary['fully_predicted_count']:,}")
-    logging.info(f"\n📈 Rating Statistics:")
+    logging.info(f"\nRating Statistics:")
     logging.info(f"  Mean: {summary['rating_statistics']['mean']:.3f}")
     logging.info(f"  Std: {summary['rating_statistics']['std']:.3f}")
     logging.info(f"  Range: [{summary['rating_statistics']['min']:.2f}, {summary['rating_statistics']['max']:.2f}]")
-    logging.info(f"\n❤️  Like Statistics:")
+    logging.info(f"\nLike Statistics:")
     logging.info(f"  Predicted likes: {summary['like_statistics']['total_predicted_likes']:,}")
     logging.info(f"  Like ratio: {summary['like_statistics']['predicted_like_ratio']:.3f}")
     logging.info(f"  Like probability mean: {summary['like_statistics']['like_probability_mean']:.3f}")
@@ -569,27 +625,27 @@ def generate_prediction_summary(predictions: Dict, users: Dict, films: Dict) -> 
     return summary
 
 # ──────────────────────────────────────────────
-# 🚀 MAIN EXECUTION PIPELINE
+# MAIN EXECUTION PIPELINE
 # ──────────────────────────────────────────────
 def main():
     """Main execution pipeline"""
-    logging.info("Starting prediction and upload pipeline...")
+    logging.info("Starting prediction and upload pipeline with correlation features...")
     
     try:
         # Connect to MongoDB
         db = connect_to_mongodb()
         
-        # Load trained models
+        # Load trained models with correlation features
         models = load_xgboost_models(db)
         
-        # Load users and films data
+        # Load users and films data (now with correlation stats)
         users, films = load_users_and_films(db)
         
         if not users or not films:
             logging.error("No users or films found in database")
             return
         
-        # Generate predictions for all user-film pairs
+        # Generate predictions for all user-film pairs with correlation features
         predictions = predict_for_all_users(users, films, models)
         
         # Generate summary statistics
@@ -601,12 +657,12 @@ def main():
         # Save summary to a separate collection
         db["prediction_summaries"].insert_one(summary)
         
-        logging.info(f"✅ Prediction pipeline completed successfully!")
+        logging.info(f"Prediction pipeline with correlation features completed successfully!")
         logging.info(f"   Uploaded: {uploaded_count} films with predictions")
         logging.info(f"   Summary saved to 'prediction_summaries' collection")
         
     except Exception as e:
-        logging.error(f"❌ Prediction pipeline failed: {e}")
+        logging.error(f"Prediction pipeline failed: {e}")
         import traceback
         traceback.print_exc()
         raise
