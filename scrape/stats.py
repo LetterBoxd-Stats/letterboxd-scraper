@@ -268,7 +268,7 @@ def compute_user_stats(db, users_collection_name, films_collection_name):
                 
                 # Genre like ratio
                 genre_like_ratio = genre_likes[genre] / genre_interactions[genre] if genre_interactions[genre] > 0 else 0
-                genre_avg_likes.append(genre_like_rating)
+                genre_avg_likes.append(genre_like_ratio)
         
         # 9. Average rating vs genre like ratio correlation (across genres)
         if len(genre_avg_ratings) >= 2 and len(genre_avg_likes) >= 2:
