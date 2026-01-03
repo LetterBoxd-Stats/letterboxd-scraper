@@ -4,6 +4,24 @@ This is a set of Python scripts used to scrape and store [Letterboxd](https://le
 
 ---
 
+## GitHub Actions
+
+This project includes a preconfigured GitHub Actions workflow that automatically triggers Python scripts to scrape LetterBoxd, compute user and film stats, and train a movie rating prediction model, and compute those predictions (see `full_process.yml`). This GitHub Action is scheduled to run automatically and can also be triggered manually through the GitHub GUI. The schedule is defined using cron syntax in the workflow file:
+
+```yaml
+schedule:
+    - cron: "0 8 * * *" # runs every day at 8:00 AM UTC (2:00 AM CST / 3:00 AM CDT)
+```
+
+There are 4 separate GitHub Actions that can be triggered manually through the GitHub Action GUI. Each of these performs a portion of the full process:
+
+1. Scraping LetterBoxd (`1_scrape.yml`, which runs `scrape/scraper.py`)
+2. Computing user and film stats and superlatives (`2_stats.yml`, which runs `scrape/stats.py`)
+3. Training a model to predict users' film ratings (`3_train.yml`, which runs `prediction/train_model.py`)
+4. Using the model to make the predictions (`4_predict.yml`, which runs `prediction/predictor.py`)
+
+---
+
 ## Environment Variables
 
 These variables are loaded via dotenv for local development and should also be added to your GitHub Action repository secrets.
@@ -39,28 +57,13 @@ source venv/bin/activate  # or venv\Scripts\activate on Windows
 pip install -r requirements.txt
 ```
 
-4. Run the desired script:
+4. Set environment variables.
+
+5. Run the desired script:
 
 ```bash
 python -m folder_name.script_name
 ```
-
----
-
-## Scraping and Stats
-
-This project includes a preconfigured GitHub Actions workflow that automatically triggers the scraper, computes stats, and retrains the prediction models on a schedule (see `.github/workflows/scrape.yml`). This GitHub Action can also be triggered manually through the GitHub GUI. If you're setting this up in your own GitHub repo, ensure your GitHub repository secrets are configured.
-
-The schedule is defined using cron syntax in the workflow file:
-
-```yaml
-schedule:
-    - cron: "0 8 * * *" # runs every day at 8:00 AM UTC (2:00 AM CST / 3:00 AM CDT)
-```
-
-There is a separate preconfigured GitHub Actions workflow that triggers only a computation of the stats (see `.github/workflows/stats.yml`). This action is triggered manually through the GitHub GUI.
-
-There is another separate preconfigured GitHub Actions workflow that triggers only the training of the models (see `.github/workflows/prediction.yml`). This action is triggered manually through the GitHub GUI
 
 ---
 
@@ -69,17 +72,19 @@ There is another separate preconfigured GitHub Actions workflow that triggers on
 ```bash
 .github/
 ├──workflows/
-    ├── scrape.yml     # Scrape action configuration
-	├── stats.yml	   # Compute stats action configuration
-	├── prediction.yml # Train prediction model action configuration
-├── CODEOWNERS		   # List of codeowners that must approve PR
+    ├── full_process.yml     # Full scrape and computations action configuration
+    ├── 1_scrape.yml           # Scrape action configuration
+	├── 2_stats.yml	         # Compute stats action configuration
+	├── 3_train.yml            # Train prediction model action configuration
+	├── 4_predict.yml          # Compute predictions action configuration
+├── CODEOWNERS		         # List of codeowners that must approve PR
 scrape/
-├── scraper.py		   # Scraping functionality
-├── stats.py		   # Stats computation
+├── scraper.py		         # Scraping functionality
+├── stats.py		         # Stats computation
 prediction/
-├── predictor.py	   # Model utilization
-├── train_model.py	   # Model training
-.env                   # Local environment variables (not in repository)
+├── predictor.py	         # Model utilization
+├── train_model.py	         # Model training
+.env                         # Local environment variables (not in repository)
 .gitignore
 README.md
 requirements.txt
