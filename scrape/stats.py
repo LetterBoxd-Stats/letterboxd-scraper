@@ -575,7 +575,130 @@ def compute_superlatives(db, users_collection_name, films_collection_name, super
     total_superlatives = sum(len(superlatives) for superlatives in categories.values())
     logging.info(f"Computed {total_superlatives} superlatives across {len(categories)} categories and saved to database.")
 
-# ... (rest of the file remains the same - handle_ties, find_all_with_value, etc.)
+def handle_ties(superlative, users, films):
+    """Handle ties for all positions in a superlative"""
+    if not superlative['first'] or superlative['first_value'] is None:
+        return
+    
+    # Determine if this is a user or film superlative
+    is_user_superlative = 'username' in (superlative['first'][0] if superlative['first'] else '')
+    
+    # Handle first place ties
+    first_value = superlative['first_value']
+    all_first = find_all_with_value(superlative['name'], first_value, users, films, is_user_superlative)
+    
+    if len(all_first) > 1:
+        superlative['first'] = all_first
+        # If exactly 2 films tied for first: clear second place but keep third
+        if len(all_first) == 2:
+            superlative['second'] = []
+            superlative['second_value'] = None
+        # If 3+ films tied for first: clear both second and third places
+        elif len(all_first) > 2:
+            superlative['second'] = []
+            superlative['second_value'] = None
+            superlative['third'] = []
+            superlative['third_value'] = None
+    
+    # Handle second place ties (only if first place has a single winner)
+    if (superlative['second'] and superlative['second_value'] is not None and 
+        len(superlative['first']) == 1):
+        second_value = superlative['second_value']
+        all_second = find_all_with_value(superlative['name'], second_value, users, films, is_user_superlative)
+        # Remove any that are already in first place
+        all_second = [c for c in all_second if c not in superlative['first']]
+        
+        if len(all_second) > 1:
+            superlative['second'] = all_second
+            # Clear third place since second place is now a tie
+            superlative['third'] = []
+            superlative['third_value'] = None
+    
+    # Handle third place ties (allowed if: first place single winner + second place single winner, OR first place 2-way tie)
+    if (superlative['third'] and superlative['third_value'] is not None and 
+        (len(superlative['first']) == 1 and len(superlative['second']) == 1) or  # single winners for 1st and 2nd
+        (len(superlative['first']) == 2 and not superlative['second'])):  # 2-way tie for 1st, no 2nd place
+        third_value = superlative['third_value']
+        all_third = find_all_with_value(superlative['name'], third_value, users, films, is_user_superlative)
+        # Remove any that are already in first or second place
+        all_third = [c for c in all_third if c not in superlative['first'] and c not in superlative['second']]
+        
+        if len(all_third) > 1:
+            superlative['third'] = all_third
+
+def find_all_with_value(superlative_name, value, users, films, is_user_superlative):
+    """Find all users or films with the given value for the superlative"""
+    if is_user_superlative:
+        return [user['username'] for user in users if get_user_value(user, superlative_name) == value]
+    else:
+        return [film['film_title'] for film in films if get_film_value(film, superlative_name) == value]
+
+def find_next_unique_value(superlative_name, current_value, users, films, is_user_superlative, reverse=False):
+    """Find the next unique value after the current value"""
+    if is_user_superlative:
+        all_values = sorted(set([get_user_value(user, superlative_name) for user in users if get_user_value(user, superlative_name) is not None]), reverse=reverse)
+    else:
+        all_values = sorted(set([get_film_value(film, superlative_name) for film in films if get_film_value(film, superlative_name) is not None]), reverse=reverse)
+    
+    try:
+        current_index = all_values.index(current_value)
+        if current_index + 1 < len(all_values):
+            return all_values[current_index + 1]
+    except ValueError:
+        pass
+    
+    return None
+
+def is_high_value_better(superlative_name):
+    """Determine if higher values are better for this superlative"""
+    high_value_better = [
+        "Positive Polly", "Positive Polly (Comparative)", "Best Attention Span", 
+        "Modernist", "Best Movie", "Most Underrated Movie", "Most Polarizing Movie",
+        "Critic", "Film Junkie"
+    ]
+    return superlative_name in high_value_better
+
+def get_user_value(user, superlative_name):
+    """Helper function to get the appropriate value for a user based on superlative name"""
+    stats = user.get('stats', {})
+    if superlative_name == "Positive Polly":
+        return stats.get('avg_rating')
+    elif superlative_name == "Positive Polly (Comparative)":
+        return stats.get('mean_diff')
+    elif superlative_name == "Negative Nelly":
+        return stats.get('avg_rating')
+    elif superlative_name == "Negative Nelly (Comparative)":
+        return stats.get('mean_diff')
+    elif superlative_name == "Best Attention Span":
+        return stats.get('avg_runtime')
+    elif superlative_name == "TikTok Brain":
+        return stats.get('avg_runtime')
+    elif superlative_name == "Unc":
+        return stats.get('avg_year_watched')
+    elif superlative_name == "Modernist":
+        return stats.get('avg_year_watched')
+    elif superlative_name == "Critic":
+        return stats.get('num_ratings')
+    elif superlative_name == "Film Junkie":
+        return stats.get('num_watches')
+    elif superlative_name == "BFFs" or superlative_name == "Enemies":
+        # These are handled separately in the pairs logic
+        return None
+    return None
+
+def get_film_value(film, superlative_name):
+    """Helper function to get the appropriate value for a film based on superlative name"""
+    if superlative_name == "Best Movie":
+        return film.get('avg_rating')
+    elif superlative_name == "Worst Movie":
+        return film.get('avg_rating')
+    elif superlative_name == "Most Polarizing Movie":
+        return film.get('stdev_rating')
+    elif superlative_name == "Most Underrated Movie" or superlative_name == "Most Overrated Movie":
+        # These are handled separately with diff calculation
+        if film.get('avg_rating') is not None and film.get('metadata') is not None and film['metadata'].get('avg_rating') is not None:
+            return film['avg_rating'] - film['metadata']['avg_rating']
+    return None
 
 def main():
     # Configure logging
