@@ -686,7 +686,7 @@ def main():
         uploaded_count = upload_predictions_to_mongodb(db, predictions, batch_size=50)
         
         # Save summary to a separate collection
-        db["prediction_summaries"].insert_one(summary)
+        # db["prediction_summaries"].insert_one(summary)
         
         logging.info(f"✅ Prediction pipeline with correlation features completed successfully!")
         logging.info(f"   Uploaded: {uploaded_count} films with predictions")
