@@ -180,13 +180,23 @@ def process_interaction(user, user_data, film_id, film_reviews, film_watches,
 
     # --- Correlation-based features ---
     # Get user's correlation coefficients (default to 0 if not available)
-    runtime_rating_corr = correlation_stats.get('runtime_vs_rating', {}).get('correlation', 0)
-    year_rating_corr = correlation_stats.get('year_vs_rating', {}).get('correlation', 0)
-    letterboxd_rating_corr = correlation_stats.get('letterboxd_vs_rating', {}).get('correlation', 0)
-    runtime_like_corr = correlation_stats.get('runtime_vs_like', {}).get('correlation', 0)
-    year_like_corr = correlation_stats.get('year_vs_like', {}).get('correlation', 0)
-    letterboxd_like_corr = correlation_stats.get('letterboxd_vs_like', {}).get('correlation', 0)
-    rating_like_corr = correlation_stats.get('rating_vs_like', {}).get('correlation', 0)
+    def get_corr_value(corr_dict, key):
+        """Safely extract correlation value from correlation stats"""
+        if not corr_dict:
+            return 0.0
+        data = corr_dict.get(key)
+        if isinstance(data, dict):
+            value = data.get('correlation')
+            return value if value is not None else 0.0
+        return 0.0
+
+    runtime_rating_corr = get_corr_value(correlation_stats, 'runtime_vs_rating')
+    year_rating_corr = get_corr_value(correlation_stats, 'year_vs_rating')
+    letterboxd_rating_corr = get_corr_value(correlation_stats, 'letterboxd_vs_rating')
+    runtime_like_corr = get_corr_value(correlation_stats, 'runtime_vs_like')
+    year_like_corr = get_corr_value(correlation_stats, 'year_vs_like')
+    letterboxd_like_corr = get_corr_value(correlation_stats, 'letterboxd_vs_like')
+    rating_like_corr = get_corr_value(correlation_stats, 'rating_vs_like')
 
     # --- Base feature set with correlation-based adjustments ---
     base_features = {
@@ -223,7 +233,7 @@ def process_interaction(user, user_data, film_id, film_reviews, film_watches,
         # Correlation-weighted features (personalized)
         "runtime_weighted_by_corr": film_runtime * (1 + runtime_rating_corr) if film_runtime else 0,
         "year_weighted_by_corr": film_year * (1 + year_rating_corr) if film_year else 0,
-        "letterboxd_weighted_by_corr": film_letterboxd_avg * (1 + letterboxd_rating_corr),
+        "letterboxd_weighted_by_corr": (film_letterboxd_avg or 0) * (1 + letterboxd_rating_corr),
 
         # Genre compatibility
         **get_genre_compatibility_features(user_stats, film_genres),
@@ -239,9 +249,9 @@ def process_interaction(user, user_data, film_id, film_reviews, film_watches,
         like_record["is_liked"] = bool(is_liked)
         
         # Add correlation-weighted features for like prediction
-        like_record["runtime_weighted_by_like_corr"] = film_runtime * (1 + runtime_like_corr) if film_runtime else 0
-        like_record["year_weighted_by_like_corr"] = film_year * (1 + year_like_corr) if film_year else 0
-        like_record["letterboxd_weighted_by_like_corr"] = film_letterboxd_avg * (1 + letterboxd_like_corr)
+        like_record["runtime_weighted_by_like_corr"] = (film_runtime or 0) * (1 + runtime_like_corr)
+        like_record["year_weighted_by_like_corr"] = (film_year or 0) * (1 + year_like_corr)
+        like_record["letterboxd_weighted_by_like_corr"] = (film_letterboxd_avg or 0) * (1 + letterboxd_like_corr)
         
         like_records.append(like_record)
 
