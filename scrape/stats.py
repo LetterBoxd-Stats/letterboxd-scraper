@@ -158,7 +158,13 @@ def compute_user_stats(db, users_collection_name, films_collection_name):
                 
                 # Runtime and year - for all interactions
                 year = film['metadata'].get('year')
+                if year:
+                    total_years += year
+                    count_with_year += 1
                 runtime = film['metadata'].get('runtime')
+                if runtime:
+                    total_runtime += runtime
+                    count_with_runtime += 1
                 letterboxd_avg = film['metadata'].get('avg_rating')
                 
                 # Collect data for correlation analysis
@@ -284,11 +290,11 @@ def compute_user_stats(db, users_collection_name, films_collection_name):
 
         for genre in all_genres:
             # Get counts for this genre
-            num_ratings = len(genre_ratings.get(genre, []))
+            num_genre_ratings = len(genre_ratings.get(genre, []))
             num_interactions = genre_interactions.get(genre, 0)
             
             # Only include genres with sufficient data
-            if num_ratings >= MIN_RATINGS_PER_GENRE and num_interactions >= MIN_INTERACTIONS_PER_GENRE:
+            if num_genre_ratings >= MIN_RATINGS_PER_GENRE and num_interactions >= MIN_INTERACTIONS_PER_GENRE:
                 # Calculate average rating for this genre
                 avg_genre_rating = statistics.mean(genre_ratings[genre])
                 
@@ -299,7 +305,7 @@ def compute_user_stats(db, users_collection_name, films_collection_name):
                     'genre': genre,
                     'avg_rating': avg_genre_rating,
                     'like_ratio': like_ratio,
-                    'num_ratings': num_ratings,
+                    'num_ratings': num_genre_ratings,
                     'num_interactions': num_interactions
                 })
 
@@ -331,8 +337,30 @@ def compute_user_stats(db, users_collection_name, films_collection_name):
                 ]
             }
         
-        # 10. Time-based correlations if we had watch dates
-        # (Could be added if you track when users watched films)
+        # Only process pairwise differences for reviews with ratings
+        for r in reviews:
+            if 'rating' not in r:
+                continue
+            film = films.get(r['film_id'])
+            if not film:
+                continue
+
+            # Get all other reviewers for this film
+            other_reviews = [
+                rev for rev in film.get('reviews', [])
+                if rev.get('rating') is not None and rev.get('user') != user['username']
+            ]
+
+            if not other_reviews:
+                continue
+
+            for o in other_reviews:
+                diff = r['rating'] - o['rating']
+                diffs.append(diff)
+                abs_diffs.append(abs(diff))
+
+                pairwise_diffs[o['user']].append(diff)
+                pairwise_abs_diffs[o['user']].append(abs(diff))
         
         # Calculate genre percentages and average ratings
         genre_stats = {}
@@ -1175,6 +1203,23 @@ def get_user_value(user, superlative_name):
     elif superlative_name == "BFFs" or superlative_name == "Enemies":
         # These are handled separately in the pairs logic
         return None
+        # NEW: Add cases for correlation superlatives
+    correlation_superlatives = {
+        "Epic Film Lover": 'runtime_vs_rating',
+        "Short Film Lover": 'runtime_vs_rating',  # Same correlation, different interpretation
+        "Classic Film Lover": 'year_vs_rating',
+        "Modern Film Lover": 'year_vs_rating',  # Same correlation, different interpretation
+        "Mainstream Tastes": 'letterboxd_vs_rating',
+        "Contrarian Tastes": 'letterboxd_vs_rating',  # Same correlation, different interpretation
+        "Predictable Liker": 'rating_vs_like',
+        "Unpredictable Liker": 'rating_vs_like'  # Same correlation, different interpretation
+    }
+    
+    if superlative_name in correlation_superlatives:
+        corr_key = correlation_superlatives[superlative_name]
+        corr_stats = stats.get('correlation_stats', {}).get(corr_key, {})
+        return corr_stats.get('correlation')
+    
     return None
 
 def get_film_value(film, superlative_name):
