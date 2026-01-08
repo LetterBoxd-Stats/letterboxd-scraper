@@ -309,7 +309,101 @@ def compute_user_stats(db, users_collection_name, films_collection_name):
                     'num_interactions': num_interactions
                 })
 
-        # 9. Average rating vs genre like ratio correlation (across genres)
+        # 9. NEW: Pairwise correlation statistics
+        # Only process pairwise differences for reviews with ratings
+        for r in reviews:
+            if 'rating' not in r:
+                continue
+            film = films.get(r['film_id'])
+            if not film:
+                continue
+
+            # Get all other reviewers for this film
+            other_reviews = [
+                rev for rev in film.get('reviews', [])
+                if rev.get('rating') is not None and rev.get('user') != user['username']
+            ]
+
+            if not other_reviews:
+                continue
+
+            for o in other_reviews:
+                diff = r['rating'] - o['rating']
+                diffs.append(diff)
+                abs_diffs.append(abs(diff))
+
+                pairwise_diffs[o['user']].append(diff)
+                pairwise_abs_diffs[o['user']].append(abs(diff))
+
+        # Calculate correlation for each pairwise comparison
+        pairwise_correlations = {}
+
+        for other, difflist in pairwise_abs_diffs.items():
+            # Get all paired ratings for correlation
+            user_ratings = []
+            other_ratings = []
+            
+            # We need to collect the actual ratings, not just differences
+            for r in reviews:
+                if 'rating' not in r:
+                    continue
+                film = films.get(r['film_id'])
+                if not film:
+                    continue
+                    
+                # Find the other user's rating for this same film
+                other_review = next(
+                    (rev for rev in film.get('reviews', [])
+                    if rev.get('user') == other and rev.get('rating') is not None),
+                    None
+                )
+                
+                if other_review:
+                    user_ratings.append(r['rating'])
+                    other_ratings.append(other_review['rating'])
+            
+            # Calculate Pearson correlation if we have enough data points
+            if len(user_ratings) >= 2:
+                try:
+                    # Check for constant arrays
+                    if len(set(user_ratings)) <= 1 or len(set(other_ratings)) <= 1:
+                        pairwise_correlations[other] = {
+                            'correlation': None,
+                            'p_value': None,
+                            'sample_size': len(user_ratings),
+                            'reason': 'Constant values (no variation)',
+                            'user_unique_values': len(set(user_ratings)),
+                            'other_unique_values': len(set(other_ratings))
+                        }
+                    else:
+                        corr, p_value = pearsonr(user_ratings, other_ratings)
+                        pairwise_correlations[other] = {
+                            'correlation': round(float(corr), 4),
+                            'p_value': round(float(p_value), 4),
+                            'sample_size': len(user_ratings),
+                            'interpretation': interpret_correlation(corr),
+                            'user_unique_values': len(set(user_ratings)),
+                            'other_unique_values': len(set(other_ratings))
+                        }
+                except Exception as e:
+                    pairwise_correlations[other] = {
+                        'correlation': None,
+                        'p_value': None,
+                        'sample_size': len(user_ratings),
+                        'reason': f'Calculation error: {str(e)}'
+                    }
+            else:
+                pairwise_correlations[other] = {
+                    'correlation': None,
+                    'p_value': None,
+                    'sample_size': len(user_ratings),
+                    'reason': f'Insufficient data points: {len(user_ratings)} < 2'
+                }
+
+        # Also add individual correlations to correlation_stats for easy access
+        correlation_stats['pairwise_correlations'] = pairwise_correlations
+
+        # 10. Average rating vs genre like ratio correlation (across genres)
         if len(genre_corr_data) >= 2:
             # Extract ratings and like ratios for correlation calculation
             ratings = [data['avg_rating'] for data in genre_corr_data]
@@ -337,31 +431,6 @@ def compute_user_stats(db, users_collection_name, films_collection_name):
                 ]
             }
         
-        # Only process pairwise differences for reviews with ratings
-        for r in reviews:
-            if 'rating' not in r:
-                continue
-            film = films.get(r['film_id'])
-            if not film:
-                continue
-
-            # Get all other reviewers for this film
-            other_reviews = [
-                rev for rev in film.get('reviews', [])
-                if rev.get('rating') is not None and rev.get('user') != user['username']
-            ]
-
-            if not other_reviews:
-                continue
-
-            for o in other_reviews:
-                diff = r['rating'] - o['rating']
-                diffs.append(diff)
-                abs_diffs.append(abs(diff))
-
-                pairwise_diffs[o['user']].append(diff)
-                pairwise_abs_diffs[o['user']].append(abs(diff))
-        
         # Calculate genre percentages and average ratings
         genre_stats = {}
         for genre in all_genres:
@@ -387,6 +456,7 @@ def compute_user_stats(db, users_collection_name, films_collection_name):
         mean_abs_diff = (sum(abs_diffs) / len(abs_diffs)) if abs_diffs else None
 
         # Summarize pairwise agreements
+        # Summarize pairwise agreements
         agreement_stats = {}
         for other, difflist in pairwise_abs_diffs.items():
             mean_diff_with_other = (sum(pairwise_diffs[other]) / len(pairwise_diffs[other])) if pairwise_diffs[other] else None
@@ -394,7 +464,9 @@ def compute_user_stats(db, users_collection_name, films_collection_name):
             agreement_stats[other] = {
                 'mean_diff': mean_diff_with_other,
                 'mean_abs_diff': mean_abs_diff_with_other,
-                'num_shared': len(difflist)  # how many films both rated
+                'num_shared': len(difflist),  # how many films both rated
+                'correlation': pairwise_correlations.get(other, {}).get('correlation'),  # Added correlation
+                'correlation_p_value': pairwise_correlations.get(other, {}).get('p_value')  # Added p-value
             }
 
         # Calculate average movie length and year
@@ -427,7 +499,7 @@ def compute_user_stats(db, users_collection_name, films_collection_name):
             }}
         )
     
-    logging.info("User statistics updated successfully with correlation coefficients.")
+    logging.info("User statistics updated successfully.")
 
 def interpret_correlation(corr_value):
     """Interpret the correlation coefficient value"""
@@ -1255,9 +1327,9 @@ def main():
     logging.info("Connected to MongoDB")
 
     # Compute statistics
-    compute_film_stats(db, films_collection_name)
+    # compute_film_stats(db, films_collection_name)
     compute_user_stats(db, users_collection_name, films_collection_name)
-    compute_superlatives(db, users_collection_name, films_collection_name, superlatives_collection_name)
+    # compute_superlatives(db, users_collection_name, films_collection_name, superlatives_collection_name)
 
 if __name__ == "__main__":
     main()
